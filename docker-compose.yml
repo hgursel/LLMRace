@@ -1,0 +1,27 @@
+services:
+  llmrace-proxy:
+    build: ./proxy
+    container_name: llmrace-proxy
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      - DATABASE_URL=sqlite:////data/llmrace.db
+      - OLLAMA_DEFAULT_URL=http://host.docker.internal:11434
+      - OPENAI_COMPAT_DEFAULT_URL=http://host.docker.internal:1234
+      - LLAMACPP_DEFAULT_URL=http://host.docker.internal:8080
+      - CUSTOM_DEFAULT_URL=http://host.docker.internal:1234
+    volumes:
+      - llmrace_data:/data
+    restart: unless-stopped
+
+  llmrace-ui:
+    build: ./ui
+    container_name: llmrace-ui
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - llmrace-proxy
+    restart: unless-stopped
+
+volumes:
+  llmrace_data:

@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+proxy/.pytest_cache/
+proxy/.venv/
+ui/node_modules/
+ui/dist/
+*.db
