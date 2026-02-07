@@ -7,9 +7,15 @@ services:
     environment:
       - DATABASE_URL=sqlite:////data/llmrace.db
       - OLLAMA_DEFAULT_URL=http://host.docker.internal:11434
+      - OPENAI_DEFAULT_URL=https://api.openai.com
+      - ANTHROPIC_DEFAULT_URL=https://api.anthropic.com
+      - OPENROUTER_DEFAULT_URL=https://openrouter.ai
       - OPENAI_COMPAT_DEFAULT_URL=http://host.docker.internal:1234
       - LLAMACPP_DEFAULT_URL=http://host.docker.internal:8080
       - CUSTOM_DEFAULT_URL=http://host.docker.internal:1234
+      - LLMRACE_SECRET_KEY=${LLMRACE_SECRET_KEY:-llmrace-dev-secret-change-me}
+      - OPENROUTER_HTTP_REFERER=${OPENROUTER_HTTP_REFERER:-}
+      - OPENROUTER_X_TITLE=${OPENROUTER_X_TITLE:-LLMRace}
       - JAN_API_KEY=${JAN_API_KEY:-}
       - LMSTUDIO_API_KEY=${LMSTUDIO_API_KEY:-}
       - LLAMACPP_API_KEY=${LLAMACPP_API_KEY:-}

@@ -17,6 +17,7 @@ class ConnectionCreate(BaseModel):
     type: ConnectionType
     base_url: str
     api_key_env_var: str | None = None
+    api_key: str | None = None
 
 
 class ConnectionUpdate(BaseModel):
@@ -24,6 +25,8 @@ class ConnectionUpdate(BaseModel):
     type: ConnectionType | None = None
     base_url: str | None = None
     api_key_env_var: str | None = None
+    api_key: str | None = None
+    clear_api_key: bool = False
 
 
 class ConnectionOut(BaseModel):
@@ -32,6 +35,7 @@ class ConnectionOut(BaseModel):
     type: ConnectionType
     base_url: str
     api_key_env_var: str | None
+    has_stored_api_key: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -44,6 +48,19 @@ class ConnectionTestResponse(BaseModel):
     latency_ms: int | None
     models: list[str] = Field(default_factory=list)
     error: str | None = None
+
+
+class ConnectionRuntimeCheckResponse(BaseModel):
+    connection_id: int
+    provider_type: ConnectionType
+    base_url: str
+    auth_source: str
+    auth_present: bool
+    discovery_ok: bool
+    latency_ms: int | None
+    models: list[str] = Field(default_factory=list)
+    error: str | None = None
+    hints: list[str] = Field(default_factory=list)
 
 
 class CarCreate(BaseModel):

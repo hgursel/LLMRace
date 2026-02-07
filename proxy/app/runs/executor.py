@@ -251,6 +251,7 @@ class RaceExecutor:
                 type=connection.type,
                 base_url=connection.base_url,
                 api_key_env_var=connection.api_key_env_var,
+                api_key_encrypted=connection.api_key_encrypted,
             )
             semaphore_key = connection.type.value
             max_in_flight = provider_settings.max_in_flight

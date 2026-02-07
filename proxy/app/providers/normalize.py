@@ -35,4 +35,6 @@ def build_request(connection: Connection, car: Car, test_case: TestCase) -> Norm
 def provider_mode(connection_type: ConnectionType) -> str:
     if connection_type == ConnectionType.OLLAMA:
         return "ollama"
+    if connection_type == ConnectionType.ANTHROPIC:
+        return "anthropic"
     return "openai_compat"

@@ -28,6 +28,9 @@ By default the proxy can connect to model servers on your host machine using `ho
 - LM Studio (OpenAI-compatible): `http://host.docker.internal:1234`
 - llama.cpp server (OpenAI-compatible preferred): `http://host.docker.internal:8080`
 - Jan Local API Server (OpenAI-compatible): `http://host.docker.internal:1337`
+- OpenAI: `https://api.openai.com`
+- Anthropic: `https://api.anthropic.com`
+- OpenRouter: `https://openrouter.ai`
 
 Add these connections in Garage and test them before creating cars.
 
@@ -40,9 +43,10 @@ Add these connections in Garage and test them before creating cars.
 ## Secrets and API keys
 
 API keys are **not stored in plaintext** in SQLite.
-- Store only env var names in the app (for example `LMSTUDIO_API_KEY`).
-- Set env vars on `llmrace-proxy` in `docker-compose.yml`.
-- Included passthrough env vars in compose: `JAN_API_KEY`, `LMSTUDIO_API_KEY`, `LLAMACPP_API_KEY`, `OPENAI_API_KEY`.
+- Enter API key directly in Connections form; proxy encrypts before storing.
+- `LLMRACE_SECRET_KEY` controls encryption key derivation (set this in production).
+- Legacy env-var auth still works for old connections, but direct encrypted storage is recommended.
+- Optional passthrough env vars remain in compose: `JAN_API_KEY`, `LMSTUDIO_API_KEY`, `LLAMACPP_API_KEY`, `OPENAI_API_KEY`.
 
 ## Streaming and telemetry
 
@@ -127,6 +131,19 @@ Run history, outputs, tool calls, judge results, and metrics persist across rest
     - Server Port: `1337`
     - API Prefix: `/v1`
     - Trusted Hosts: `host.docker.internal,localhost,127.0.0.1`
+- **OpenAI**
+  - Type: `OPENAI`
+  - Base URL: `https://api.openai.com`
+  - API key: enter in connection form (stored encrypted)
+- **Anthropic**
+  - Type: `ANTHROPIC`
+  - Base URL: `https://api.anthropic.com`
+  - API key: enter in connection form (stored encrypted)
+- **OpenRouter**
+  - Type: `OPENROUTER`
+  - Base URL: `https://openrouter.ai`
+  - API key: enter in connection form (stored encrypted)
+  - Optional headers via env: `OPENROUTER_HTTP_REFERER`, `OPENROUTER_X_TITLE`
 
 ## Jan quick verify
 
@@ -146,6 +163,12 @@ print(r.text[:300])
 PY
 ```
 
+Or use **Verify Runtime** button in Connections page for one-click diagnostics:
+- resolved auth source (`encrypted_db` or legacy `env_var`)
+- auth present/missing
+- discovery status and model list
+- provider-specific hints (Jan trusted hosts, Windows Docker Desktop hints)
+
 ## Troubleshooting
 
 - No models discovered:
@@ -156,13 +179,16 @@ PY
   - Use manual model name entry if discovery fails.
 - `401 Unauthorized`:
   - Connection likely requires API key.
-  - Ensure connection `API Key Env Var` is set (for Jan usually `JAN_API_KEY`).
-  - Ensure that env var exists in `llmrace-proxy` container:
-    - `docker compose exec -T llmrace-proxy sh -lc 'echo $JAN_API_KEY'`
+  - Re-save API key in the connection form (encrypted storage).
+  - For legacy env-var connections, ensure variable exists in container.
 - `403 Invalid host header` (common with Jan):
   - Jan rejected the container host header.
   - In Jan > Settings > Local API Server, set Trusted Hosts to:
     - `host.docker.internal,localhost,127.0.0.1`
+- Windows + Docker Desktop:
+  - After `.env` or network changes, recreate proxy:
+    - `docker compose up -d --force-recreate llmrace-proxy`
+  - Prefer `host.docker.internal` over `localhost` for host-run model servers.
 - Stream disconnects:
   - Re-open Race page; SSE replay resumes from persisted event sequence.
 - CORS issues:

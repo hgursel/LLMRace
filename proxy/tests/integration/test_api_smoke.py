@@ -65,6 +65,11 @@ def test_connection_suite_seed_and_models(client: Any, monkeypatch: Any) -> None
     assert models.status_code == 200
     assert 'demo-model' in models.json()
 
+    runtime = client.post(f'/api/connections/{connection_id}/verify-runtime')
+    assert runtime.status_code == 200
+    assert runtime.json()['connection_id'] == connection_id
+    assert runtime.json()['discovery_ok'] is True
+
     suites = client.get('/api/suites')
     assert suites.status_code == 200
     suite_data = suites.json()

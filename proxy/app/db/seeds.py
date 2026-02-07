@@ -9,6 +9,9 @@ from app.db.models import ConnectionType, ProviderSettings, Suite, TestCase
 def seed_provider_settings(db: Session) -> None:
     defaults = {
         ConnectionType.OLLAMA: dict(max_in_flight=1, timeout_ms=90000, retry_count=1, retry_backoff_ms=500),
+        ConnectionType.OPENAI: dict(max_in_flight=1, timeout_ms=90000, retry_count=1, retry_backoff_ms=500),
+        ConnectionType.ANTHROPIC: dict(max_in_flight=1, timeout_ms=90000, retry_count=1, retry_backoff_ms=500),
+        ConnectionType.OPENROUTER: dict(max_in_flight=1, timeout_ms=90000, retry_count=1, retry_backoff_ms=500),
         ConnectionType.OPENAI_COMPAT: dict(max_in_flight=1, timeout_ms=90000, retry_count=1, retry_backoff_ms=500),
         ConnectionType.LLAMACPP_OPENAI: dict(max_in_flight=1, timeout_ms=90000, retry_count=1, retry_backoff_ms=500),
         ConnectionType.CUSTOM: dict(max_in_flight=1, timeout_ms=90000, retry_count=1, retry_backoff_ms=500),

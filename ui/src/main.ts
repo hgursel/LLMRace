@@ -1,6 +1,6 @@
 import './styles.css'
 
-type ConnectionType = 'OLLAMA' | 'OPENAI_COMPAT' | 'LLAMACPP_OPENAI' | 'CUSTOM'
+type ConnectionType = 'OLLAMA' | 'OPENAI' | 'ANTHROPIC' | 'OPENROUTER' | 'OPENAI_COMPAT' | 'LLAMACPP_OPENAI' | 'CUSTOM'
 type RunStatus = 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED'
 type TabKey = 'garage' | 'cars' | 'tracks' | 'race' | 'leaderboard' | 'history' | 'settings'
 
@@ -10,6 +10,20 @@ type Connection = {
   type: ConnectionType
   base_url: string
   api_key_env_var?: string | null
+  has_stored_api_key?: boolean
+}
+
+type ConnectionRuntimeCheck = {
+  connection_id: number
+  provider_type: ConnectionType
+  base_url: string
+  auth_source: string
+  auth_present: boolean
+  discovery_ok: boolean
+  latency_ms?: number | null
+  models: string[]
+  error?: string | null
+  hints: string[]
 }
 
 type Car = {
@@ -198,6 +212,7 @@ const state = {
   countdownText: '',
   suiteEditorText: '',
   connectionDiagnostics: new Map<number, ConnectionDiagnostic>(),
+  connectionRuntimeChecks: new Map<number, ConnectionRuntimeCheck>(),
   historyStatusFilter: '' as '' | RunStatus,
   historySuiteFilter: 0,
   historyCarFilter: 0,
@@ -208,6 +223,44 @@ const state = {
 let stream: EventSource | null = null
 const RAW_PROXY_BASE = ((import.meta.env.VITE_PROXY_BASE_URL as string | undefined) ?? '').trim()
 const PROXY_BASE = RAW_PROXY_BASE ? RAW_PROXY_BASE.replace(/\/$/, '') : ''
+
+const CONNECTION_PRESETS: Record<string, { type: ConnectionType; baseUrl: string; note: string }> = {
+  OLLAMA: {
+    type: 'OLLAMA',
+    baseUrl: 'http://host.docker.internal:11434',
+    note: 'Local Ollama endpoint; no API key required.',
+  },
+  JAN: {
+    type: 'LLAMACPP_OPENAI',
+    baseUrl: 'http://host.docker.internal:1337',
+    note: 'Jan Local API Server (llama.cpp). API key required.',
+  },
+  OPENAI: {
+    type: 'OPENAI',
+    baseUrl: 'https://api.openai.com',
+    note: 'OpenAI cloud API. Use project API key.',
+  },
+  ANTHROPIC: {
+    type: 'ANTHROPIC',
+    baseUrl: 'https://api.anthropic.com',
+    note: 'Anthropic Messages API. Uses x-api-key auth.',
+  },
+  OPENROUTER: {
+    type: 'OPENROUTER',
+    baseUrl: 'https://openrouter.ai',
+    note: 'OpenRouter API. Optional referer/title headers are sent by proxy.',
+  },
+  OPENAI_COMPAT: {
+    type: 'OPENAI_COMPAT',
+    baseUrl: 'http://host.docker.internal:1234',
+    note: 'OpenAI-compatible local server (LM Studio style).',
+  },
+  CUSTOM: {
+    type: 'CUSTOM',
+    baseUrl: 'http://host.docker.internal:1234',
+    note: 'Custom OpenAI-compatible endpoint.',
+  },
+}
 
 function buildUrl(path: string): string {
   if (path.startsWith('http://') || path.startsWith('https://')) {
@@ -284,7 +337,10 @@ function dockerHint(errorMessage?: string | null): string | null {
     return 'Hint: Jan Local API Server is rejecting host headers. In Jan > Settings > Local API Server, set Trusted Hosts to: host.docker.internal,localhost,127.0.0.1'
   }
   if (text.includes('401') || text.includes('unauthorized')) {
-    return 'Hint: this endpoint requires API key auth. Ensure API Key Env Var is set on the connection and that env var exists in llmrace-proxy container environment.'
+    return 'Hint: this endpoint requires API key auth. Save API key directly in the connection form, then re-test.'
+  }
+  if (text.includes('windows tip')) {
+    return 'Hint: Windows Docker Desktop users should recreate containers after .env/network changes: docker compose up -d --force-recreate'
   }
   if (text.includes('host.docker.internal')) {
     return null
@@ -296,9 +352,15 @@ function dockerHint(errorMessage?: string | null): string | null {
 }
 
 function renderConnectionDiagnostic(connectionId: number): string {
+  const connection = getConnectionById(connectionId)
   const diagnostic = state.connectionDiagnostics.get(connectionId)
+  const runtime = state.connectionRuntimeChecks.get(connectionId)
+  const keySummary = connection?.has_stored_api_key
+    ? '<div class="conn-model-list">Auth: encrypted key saved</div>'
+    : '<div class="conn-error">Auth: no stored key</div>'
   if (!diagnostic) {
-    return '<div class="conn-health">Status: untested</div>'
+    const runtimeSummary = runtime ? `<div class="conn-model-list">Runtime auth source: ${runtime.auth_source}</div>` : ''
+    return `<div class="conn-health">Status: untested${keySummary}${runtimeSummary}</div>`
   }
 
   const checkedAt = new Date(diagnostic.checked_at_ms).toLocaleTimeString()
@@ -312,8 +374,14 @@ function renderConnectionDiagnostic(connectionId: number): string {
   const errorSummary = diagnostic.error ? `<div class="conn-error">${diagnostic.error}</div>` : ''
   const hint = dockerHint(diagnostic.error)
   const hintSummary = hint ? `<div class="conn-hint">${hint}</div>` : ''
+  const runtimeSummary = runtime
+    ? `<div class="conn-model-list">Runtime auth source: ${runtime.auth_source} | auth_present: ${runtime.auth_present}</div>`
+    : ''
+  const runtimeHints = runtime?.hints?.length
+    ? `<div class="conn-hint">${runtime.hints.join(' ')}</div>`
+    : ''
 
-  return `<div class="conn-health ${statusClass}">Status: ${statusLabel}${latencySummary} | checked ${checkedAt}${modelSummary}${errorSummary}${hintSummary}</div>`
+  return `<div class="conn-health ${statusClass}">Status: ${statusLabel}${latencySummary} | checked ${checkedAt}${keySummary}${modelSummary}${errorSummary}${runtimeSummary}${runtimeHints}${hintSummary}</div>`
 }
 
 function getConnectionById(connectionId: number): Connection | undefined {
@@ -475,6 +543,9 @@ async function refreshData(): Promise<void> {
   state.connectionDiagnostics = new Map(
     Array.from(state.connectionDiagnostics.entries()).filter(([id]) => connections.some((connection) => connection.id === id)),
   )
+  state.connectionRuntimeChecks = new Map(
+    Array.from(state.connectionRuntimeChecks.entries()).filter(([id]) => connections.some((connection) => connection.id === id)),
+  )
 
   if (!state.selectedSuiteId && suites.length > 0) {
     state.selectedSuiteId = suites[0].id
@@ -523,6 +594,7 @@ function renderGarage(): string {
         <div class="row" style="margin-top:6px;">
           <button data-action="test-connection" data-id="${c.id}">Test</button>
           <button data-action="discover-models" data-id="${c.id}">Models</button>
+          <button data-action="verify-runtime" data-id="${c.id}">Verify Runtime</button>
           <button data-action="delete-connection" data-id="${c.id}">Delete</button>
         </div>
       </li>`,
@@ -536,19 +608,33 @@ function renderGarage(): string {
         <form id="connectionForm" class="stack">
           <label>Name<input name="name" required /></label>
           <label>
+            Provider Preset
+            <select id="connectionPreset" name="preset">
+              <option value="OLLAMA">Ollama</option>
+              <option value="JAN">Jan (llama.cpp)</option>
+              <option value="OPENAI">OpenAI</option>
+              <option value="ANTHROPIC">Anthropic Claude</option>
+              <option value="OPENROUTER">OpenRouter</option>
+              <option value="OPENAI_COMPAT">OpenAI-compatible local</option>
+              <option value="CUSTOM">Custom</option>
+            </select>
+          </label>
+          <label>
             Type
             <select name="type">
               <option value="OLLAMA">OLLAMA</option>
+              <option value="OPENAI">OPENAI</option>
+              <option value="ANTHROPIC">ANTHROPIC</option>
+              <option value="OPENROUTER">OPENROUTER</option>
               <option value="OPENAI_COMPAT">OPENAI_COMPAT</option>
               <option value="LLAMACPP_OPENAI">LLAMACPP_OPENAI</option>
               <option value="CUSTOM">CUSTOM</option>
             </select>
           </label>
-          <label>Base URL<input name="base_url" placeholder="http://host.docker.internal:11434" required /></label>
-          <label>API Key Env Var (optional)<input name="api_key_env_var" placeholder="LMSTUDIO_API_KEY" /></label>
+          <label>Base URL<input name="base_url" id="connectionBaseUrl" placeholder="http://host.docker.internal:11434" required /></label>
+          <label>API Key (stored encrypted)<input name="api_key" type="password" placeholder="Paste API key (optional for local no-auth endpoints)" /></label>
           <div class="muted">
-            Jan (llama.cpp) quick preset: type <code>LLAMACPP_OPENAI</code>, base URL <code>http://host.docker.internal:1337</code>,
-            API key env var like <code>JAN_API_KEY</code>.
+            <span id="connectionPresetNote">${CONNECTION_PRESETS.OLLAMA.note}</span>
           </div>
           <button class="primary" type="submit">Save Connection</button>
         </form>
@@ -1046,6 +1132,21 @@ function wireEvents(): void {
 
   const connectionForm = document.getElementById('connectionForm') as HTMLFormElement | null
   if (connectionForm) {
+    const presetSelect = document.getElementById('connectionPreset') as HTMLSelectElement | null
+    const typeSelect = connectionForm.querySelector('select[name="type"]') as HTMLSelectElement | null
+    const baseUrlInput = document.getElementById('connectionBaseUrl') as HTMLInputElement | null
+    const presetNote = document.getElementById('connectionPresetNote') as HTMLSpanElement | null
+    const applyPreset = (presetKey: string) => {
+      const preset = CONNECTION_PRESETS[presetKey] ?? CONNECTION_PRESETS.CUSTOM
+      if (typeSelect) typeSelect.value = preset.type
+      if (baseUrlInput) baseUrlInput.value = preset.baseUrl
+      if (presetNote) presetNote.textContent = preset.note
+    }
+    applyPreset(presetSelect?.value ?? 'OLLAMA')
+    if (presetSelect) {
+      presetSelect.onchange = () => applyPreset(presetSelect.value)
+    }
+
     connectionForm.onsubmit = async (ev) => {
       ev.preventDefault()
       const form = new FormData(connectionForm)
@@ -1055,7 +1156,7 @@ function wireEvents(): void {
           name: String(form.get('name')),
           type: String(form.get('type')),
           base_url: String(form.get('base_url')),
-          api_key_env_var: String(form.get('api_key_env_var') ?? '') || null,
+          api_key: String(form.get('api_key') ?? '') || null,
         }),
       })
       await refreshAndRender('Connection saved.')
@@ -1136,12 +1237,34 @@ function wireEvents(): void {
     }
   })
 
+  document.querySelectorAll<HTMLButtonElement>('[data-action="verify-runtime"]').forEach((button) => {
+    button.onclick = async () => {
+      const id = Number(button.dataset.id)
+      setNotice(`[CONNECTION ${id}] runtime verify...`)
+      try {
+        const runtime = await api<ConnectionRuntimeCheck>(`/api/connections/${id}/verify-runtime`, { method: 'POST' })
+        state.connectionRuntimeChecks.set(id, runtime)
+        const message = `[CONNECTION ${id}] runtime auth=${runtime.auth_source} present=${runtime.auth_present} discovery_ok=${runtime.discovery_ok} models=${runtime.models.join(',') || '-'}`
+        appendTelemetry(message)
+        setNotice(message)
+        renderApp()
+      } catch (error) {
+        const prettyError = simplifyError(error)
+        const message = `[CONNECTION ${id}] runtime verify failed: ${prettyError}`
+        appendTelemetry(message)
+        setNotice(message)
+        alert(message)
+      }
+    }
+  })
+
   document.querySelectorAll<HTMLButtonElement>('[data-action="delete-connection"]').forEach((button) => {
     button.onclick = async () => {
       const id = Number(button.dataset.id)
       if (!confirm(`Delete connection ${id}?`)) return
       await api(`/api/connections/${id}`, { method: 'DELETE' })
       state.connectionDiagnostics.delete(id)
+      state.connectionRuntimeChecks.delete(id)
       await refreshAndRender(`Connection ${id} deleted.`)
     }
   })

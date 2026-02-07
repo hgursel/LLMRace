@@ -27,6 +27,9 @@ def now_utc() -> datetime:
 
 class ConnectionType(str, Enum):
     OLLAMA = "OLLAMA"
+    OPENAI = "OPENAI"
+    ANTHROPIC = "ANTHROPIC"
+    OPENROUTER = "OPENROUTER"
     OPENAI_COMPAT = "OPENAI_COMPAT"
     LLAMACPP_OPENAI = "LLAMACPP_OPENAI"
     CUSTOM = "CUSTOM"
@@ -55,6 +58,7 @@ class Connection(Base):
     type: Mapped[ConnectionType] = mapped_column(SqlEnum(ConnectionType), nullable=False)
     base_url: Mapped[str] = mapped_column(String(512), nullable=False)
     api_key_env_var: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now_utc, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now_utc, onupdate=now_utc, nullable=False)
 
