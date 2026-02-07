@@ -280,6 +280,12 @@ function simplifyError(input: unknown): string {
 
 function dockerHint(errorMessage?: string | null): string | null {
   const text = (errorMessage ?? '').toLowerCase()
+  if (text.includes('invalid host header')) {
+    return 'Hint: Jan Local API Server is rejecting host headers. In Jan > Settings > Local API Server, set Trusted Hosts to: host.docker.internal,localhost,127.0.0.1'
+  }
+  if (text.includes('401') || text.includes('unauthorized')) {
+    return 'Hint: this endpoint requires API key auth. Ensure API Key Env Var is set on the connection and that env var exists in llmrace-proxy container environment.'
+  }
   if (text.includes('host.docker.internal')) {
     return null
   }
@@ -540,6 +546,10 @@ function renderGarage(): string {
           </label>
           <label>Base URL<input name="base_url" placeholder="http://host.docker.internal:11434" required /></label>
           <label>API Key Env Var (optional)<input name="api_key_env_var" placeholder="LMSTUDIO_API_KEY" /></label>
+          <div class="muted">
+            Jan (llama.cpp) quick preset: type <code>LLAMACPP_OPENAI</code>, base URL <code>http://host.docker.internal:1337</code>,
+            API key env var like <code>JAN_API_KEY</code>.
+          </div>
           <button class="primary" type="submit">Save Connection</button>
         </form>
       </section>

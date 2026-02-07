@@ -237,16 +237,37 @@ class ProviderClient:
             api_key = os.getenv(connection.api_key_env_var)
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
+                headers["X-API-Key"] = api_key
+                headers["api-key"] = api_key
         return headers
 
     def _format_connection_error(self, action: str, connection: Connection, exc: Exception) -> str:
         base_url = str(getattr(connection, "base_url", "") or "")
         raw_provider = getattr(connection, "type", "UNKNOWN")
         provider = str(getattr(raw_provider, "value", raw_provider))
-        message = f"{action} failed for {provider} endpoint {base_url}: {exc}"
-        hint = self._docker_localhost_hint(base_url)
-        if hint:
-            message = f"{message} {hint}"
+        status_code: int | None = None
+        response_body = ""
+        details = str(exc)
+
+        if isinstance(exc, httpx.HTTPStatusError):
+            status_code = exc.response.status_code
+            try:
+                response_body = (exc.response.text or "").strip()
+            except Exception:  # noqa: BLE001
+                response_body = ""
+            details = f"HTTP {status_code}"
+            if response_body:
+                details = f"{details} response={response_body[:220]}"
+
+        message = f"{action} failed for {provider} endpoint {base_url}: {details}"
+        hints = [
+            self._docker_localhost_hint(base_url),
+            self._jan_trusted_host_hint(status_code, response_body),
+            self._api_key_hint(connection, status_code),
+        ]
+        hints = [hint for hint in hints if hint]
+        if hints:
+            message = f"{message} {' '.join(hints)}"
         return message
 
     def _docker_localhost_hint(self, base_url: str) -> str:
@@ -259,6 +280,31 @@ class ProviderClient:
         if host in {"localhost", "127.0.0.1", "0.0.0.0"}:
             return "Tip: proxy runs in Docker. For host services, use http://host.docker.internal:<port>."
         return ""
+
+    def _jan_trusted_host_hint(self, status_code: int | None, response_body: str) -> str:
+        if status_code != 403:
+            return ""
+        text = (response_body or "").lower()
+        if "invalid host header" in text:
+            return (
+                "Tip: Jan Local API Server rejected the host header. "
+                "In Jan > Settings > Local API Server, set Trusted Hosts to "
+                "host.docker.internal,localhost,127.0.0.1."
+            )
+        return ""
+
+    def _api_key_hint(self, connection: Connection, status_code: int | None) -> str:
+        if status_code != 401:
+            return ""
+        env_var = connection.api_key_env_var
+        if not env_var:
+            return (
+                "Tip: endpoint requires API auth. Set API Key Env Var on this connection "
+                "and expose the env var value in llmrace-proxy container environment."
+            )
+        if not os.getenv(env_var):
+            return f"Tip: env var {env_var} is not set in llmrace-proxy container environment."
+        return f"Tip: verify {env_var} value matches the provider API key."
 
     def _to_openai_message(self, msg: Any) -> dict[str, Any]:
         payload: dict[str, Any] = {"role": msg.role}

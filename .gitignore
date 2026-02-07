@@ -6,3 +6,5 @@ proxy/.venv/
 ui/node_modules/
 ui/dist/
 *.db
+.env
+.env.*

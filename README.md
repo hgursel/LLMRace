@@ -27,6 +27,7 @@ By default the proxy can connect to model servers on your host machine using `ho
 - Ollama: `http://host.docker.internal:11434`
 - LM Studio (OpenAI-compatible): `http://host.docker.internal:1234`
 - llama.cpp server (OpenAI-compatible preferred): `http://host.docker.internal:8080`
+- Jan Local API Server (OpenAI-compatible): `http://host.docker.internal:1337`
 
 Add these connections in Garage and test them before creating cars.
 
@@ -41,6 +42,7 @@ Add these connections in Garage and test them before creating cars.
 API keys are **not stored in plaintext** in SQLite.
 - Store only env var names in the app (for example `LMSTUDIO_API_KEY`).
 - Set env vars on `llmrace-proxy` in `docker-compose.yml`.
+- Included passthrough env vars in compose: `JAN_API_KEY`, `LMSTUDIO_API_KEY`, `LLAMACPP_API_KEY`, `OPENAI_API_KEY`.
 
 ## Streaming and telemetry
 
@@ -116,6 +118,33 @@ Run history, outputs, tool calls, judge results, and metrics persist across rest
 - **llama.cpp**
   - Type: `LLAMACPP_OPENAI`
   - Base URL: `http://host.docker.internal:8080`
+- **Jan (llama.cpp backend)**
+  - Type: `LLAMACPP_OPENAI` (or `OPENAI_COMPAT`)
+  - Base URL: `http://host.docker.internal:1337`
+  - API Key Env Var: `JAN_API_KEY`
+  - Jan app settings:
+    - Server Host: `127.0.0.1` or `0.0.0.0`
+    - Server Port: `1337`
+    - API Prefix: `/v1`
+    - Trusted Hosts: `host.docker.internal,localhost,127.0.0.1`
+
+## Jan quick verify
+
+From inside proxy container:
+
+```bash
+docker compose exec -T llmrace-proxy python - <<'PY'
+import os, httpx
+key = os.getenv("JAN_API_KEY", "")
+r = httpx.get(
+    "http://host.docker.internal:1337/v1/models",
+    headers={"Authorization": f"Bearer {key}", "X-API-Key": key},
+    timeout=10,
+)
+print(r.status_code)
+print(r.text[:300])
+PY
+```
 
 ## Troubleshooting
 
@@ -125,6 +154,15 @@ Run history, outputs, tool calls, judge results, and metrics persist across rest
   - In **Connections**, run **Test** first and check the inline status card (`ONLINE`/`OFFLINE`).
   - If you see connection failures from Docker, use `http://host.docker.internal:<port>` instead of `localhost`.
   - Use manual model name entry if discovery fails.
+- `401 Unauthorized`:
+  - Connection likely requires API key.
+  - Ensure connection `API Key Env Var` is set (for Jan usually `JAN_API_KEY`).
+  - Ensure that env var exists in `llmrace-proxy` container:
+    - `docker compose exec -T llmrace-proxy sh -lc 'echo $JAN_API_KEY'`
+- `403 Invalid host header` (common with Jan):
+  - Jan rejected the container host header.
+  - In Jan > Settings > Local API Server, set Trusted Hosts to:
+    - `host.docker.internal,localhost,127.0.0.1`
 - Stream disconnects:
   - Re-open Race page; SSE replay resumes from persisted event sequence.
 - CORS issues:

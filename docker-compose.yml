@@ -10,6 +10,12 @@ services:
       - OPENAI_COMPAT_DEFAULT_URL=http://host.docker.internal:1234
       - LLAMACPP_DEFAULT_URL=http://host.docker.internal:8080
       - CUSTOM_DEFAULT_URL=http://host.docker.internal:1234
+      - JAN_API_KEY=${JAN_API_KEY:-}
+      - LMSTUDIO_API_KEY=${LMSTUDIO_API_KEY:-}
+      - LLAMACPP_API_KEY=${LLAMACPP_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - llmrace_data:/data
     restart: unless-stopped
