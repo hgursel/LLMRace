@@ -213,6 +213,9 @@ const state = {
   suiteEditorText: '',
   connectionDiagnostics: new Map<number, ConnectionDiagnostic>(),
   connectionRuntimeChecks: new Map<number, ConnectionRuntimeCheck>(),
+  carFormConnectionId: 0,
+  carConnectionModels: new Map<number, string[]>(),
+  carModelsLoadingFor: 0,
   historyStatusFilter: '' as '' | RunStatus,
   historySuiteFilter: 0,
   historyCarFilter: 0,
@@ -285,6 +288,24 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(`${response.status} ${text}`)
   }
   return response.json() as Promise<T>
+}
+
+async function ensureCarConnectionModels(connectionId: number, force = false): Promise<string[]> {
+  if (!force) {
+    const cached = state.carConnectionModels.get(connectionId)
+    if (cached && cached.length > 0) {
+      return cached
+    }
+  }
+
+  state.carModelsLoadingFor = connectionId
+  try {
+    const models = await api<string[]>(`/api/connections/${connectionId}/models`)
+    state.carConnectionModels.set(connectionId, models)
+    return models
+  } finally {
+    state.carModelsLoadingFor = 0
+  }
 }
 
 function html(strings: TemplateStringsArray, ...values: Array<string | number | boolean>): string {
@@ -546,6 +567,12 @@ async function refreshData(): Promise<void> {
   state.connectionRuntimeChecks = new Map(
     Array.from(state.connectionRuntimeChecks.entries()).filter(([id]) => connections.some((connection) => connection.id === id)),
   )
+  state.carConnectionModels = new Map(
+    Array.from(state.carConnectionModels.entries()).filter(([id]) => connections.some((connection) => connection.id === id)),
+  )
+  if (state.carFormConnectionId && !connections.some((connection) => connection.id === state.carFormConnectionId)) {
+    state.carFormConnectionId = connections[0]?.id ?? 0
+  }
 
   if (!state.selectedSuiteId && suites.length > 0) {
     state.selectedSuiteId = suites[0].id
@@ -593,7 +620,6 @@ function renderGarage(): string {
         ${renderConnectionDiagnostic(c.id)}
         <div class="row" style="margin-top:6px;">
           <button data-action="test-connection" data-id="${c.id}">Test</button>
-          <button data-action="discover-models" data-id="${c.id}">Models</button>
           <button data-action="verify-runtime" data-id="${c.id}">Verify Runtime</button>
           <button data-action="delete-connection" data-id="${c.id}">Delete</button>
         </div>
@@ -648,9 +674,34 @@ function renderGarage(): string {
 }
 
 function renderCars(): string {
+  if (state.connections.length === 0) {
+    return html`
+      <div class="grid">
+        <section class="card" style="grid-column: span 12;">
+          <h3>Add Model Profile</h3>
+          <p class="muted">Add at least one connection first, then create model profiles from discovered models.</p>
+        </section>
+      </div>
+    `
+  }
+
+  if (!state.carFormConnectionId || !state.connections.some((c) => c.id === state.carFormConnectionId)) {
+    state.carFormConnectionId = state.connections[0].id
+  }
+
   const connectionOptions = state.connections
-    .map((c) => `<option value="${c.id}">${c.name} (${c.type})</option>`)
+    .map((c) => `<option value="${c.id}" ${c.id === state.carFormConnectionId ? 'selected' : ''}>${c.name} (${c.type})</option>`)
     .join('')
+  const modelOptions = state.carConnectionModels.get(state.carFormConnectionId) ?? []
+  const modelField =
+    modelOptions.length > 0
+      ? `<label>Model<select name="model_name" id="carModelSelect" required>${modelOptions.map((m) => `<option value="${m}">${m}</option>`).join('')}</select></label>`
+      : '<label>Model<input name="model_name" id="carModelInput" required placeholder="Load models or enter manually" /></label>'
+  const loadingText = state.carModelsLoadingFor === state.carFormConnectionId ? 'Loading models...' : 'Load Models'
+  const modelHint =
+    modelOptions.length > 0
+      ? `<div class="muted">${modelOptions.length} models loaded for selected connection.</div>`
+      : '<div class="muted">Click "Load Models" for selected connection, or type model manually.</div>'
 
   const rows = state.cars
     .map((c) => {
@@ -672,8 +723,12 @@ function renderCars(): string {
         <h3>Add Model Profile</h3>
         <form id="carForm" class="stack">
           <label>Profile Name<input name="name" required /></label>
-          <label>Connection<select name="connection_id" required>${connectionOptions}</select></label>
-          <label>Model<input name="model_name" required placeholder="llama3.1:8b" /></label>
+          <label>Connection<select name="connection_id" id="carConnectionSelect" required>${connectionOptions}</select></label>
+          <div class="row">
+            <button type="button" id="loadCarModelsBtn">${loadingText}</button>
+          </div>
+          ${modelField}
+          ${modelHint}
           <label>Temperature<input type="number" name="temperature" value="0.7" step="0.1" /></label>
           <label>Top P<input type="number" name="top_p" value="1" step="0.1" /></label>
           <button class="primary" type="submit">Save Profile</button>
@@ -1200,43 +1255,6 @@ function wireEvents(): void {
     }
   })
 
-  document.querySelectorAll<HTMLButtonElement>('[data-action="discover-models"]').forEach((button) => {
-    button.onclick = async () => {
-      const id = Number(button.dataset.id)
-      setNotice(`[MODELS ${id}] loading...`)
-      try {
-        const models = await api<string[]>(`/api/connections/${id}/models`)
-        const previous = state.connectionDiagnostics.get(id)
-        state.connectionDiagnostics.set(id, {
-          ok: true,
-          latency_ms: previous?.latency_ms ?? null,
-          models,
-          error: null,
-          checked_at_ms: Date.now(),
-        })
-        const msg = `[MODELS ${id}] ${models.join(', ') || 'none returned'}`
-        appendTelemetry(msg)
-        setNotice(msg)
-        renderApp()
-      } catch (error) {
-        const prettyError = simplifyError(error)
-        const previous = state.connectionDiagnostics.get(id)
-        state.connectionDiagnostics.set(id, {
-          ok: false,
-          latency_ms: previous?.latency_ms ?? null,
-          models: previous?.models ?? [],
-          error: prettyError,
-          checked_at_ms: Date.now(),
-        })
-        const msg = `[MODELS ${id}] discovery failed: ${prettyError}`
-        appendTelemetry(msg)
-        setNotice(msg)
-        alert(msg)
-        renderApp()
-      }
-    }
-  })
-
   document.querySelectorAll<HTMLButtonElement>('[data-action="verify-runtime"]').forEach((button) => {
     button.onclick = async () => {
       const id = Number(button.dataset.id)
@@ -1271,14 +1289,48 @@ function wireEvents(): void {
 
   const carForm = document.getElementById('carForm') as HTMLFormElement | null
   if (carForm) {
+    const carConnectionSelect = document.getElementById('carConnectionSelect') as HTMLSelectElement | null
+    const loadCarModelsBtn = document.getElementById('loadCarModelsBtn') as HTMLButtonElement | null
+
+    if (carConnectionSelect) {
+      carConnectionSelect.onchange = () => {
+        state.carFormConnectionId = Number(carConnectionSelect.value)
+        renderApp()
+      }
+    }
+
+    if (loadCarModelsBtn) {
+      loadCarModelsBtn.onclick = async () => {
+        const connectionId = carConnectionSelect ? Number(carConnectionSelect.value) : state.carFormConnectionId
+        if (!connectionId) return
+        setNotice(`[CAR FORM] loading models for connection ${connectionId}...`)
+        try {
+          const models = await ensureCarConnectionModels(connectionId, true)
+          const message = `[CAR FORM] loaded ${models.length} models for connection ${connectionId}`
+          appendTelemetry(message)
+          setNotice(message)
+          renderApp()
+        } catch (error) {
+          const prettyError = simplifyError(error)
+          const message = `[CAR FORM] model load failed for connection ${connectionId}: ${prettyError}`
+          appendTelemetry(message)
+          setNotice(message)
+          alert(message)
+          renderApp()
+        }
+      }
+    }
+
     carForm.onsubmit = async (ev) => {
       ev.preventDefault()
       const form = new FormData(carForm)
+      const connectionId = Number(form.get('connection_id'))
+      state.carFormConnectionId = connectionId
       await api('/api/cars', {
         method: 'POST',
         body: JSON.stringify({
           name: String(form.get('name')),
-          connection_id: Number(form.get('connection_id')),
+          connection_id: connectionId,
           model_name: String(form.get('model_name')),
           temperature: Number(form.get('temperature')),
           top_p: Number(form.get('top_p')),

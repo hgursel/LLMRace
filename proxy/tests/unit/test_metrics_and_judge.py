@@ -16,6 +16,7 @@ def test_compute_metrics_estimated_tokens() -> None:
     assert metrics.output_tokens > 0
     assert metrics.output_tokens_estimated is True
     assert metrics.tokens_per_sec is not None
+    assert round(metrics.tokens_per_sec, 4) == round(metrics.output_tokens / 1.1, 4)
 
 
 def test_parse_judge_json() -> None:

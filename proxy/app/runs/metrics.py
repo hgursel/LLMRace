@@ -39,8 +39,9 @@ def compute_metrics(
         output_tokens_estimated = usage_estimated
 
     tokens_per_sec = None
-    if generation_ms and generation_ms > 0:
-        tokens_per_sec = output_tokens / (generation_ms / 1000)
+    if total_latency_ms > 0:
+        # Use end-to-end latency for more stable and comparable throughput.
+        tokens_per_sec = output_tokens / (total_latency_ms / 1000)
 
     return MetricComputation(
         ttft_ms=ttft_ms,
