@@ -223,6 +223,9 @@ class JudgeResponse(BaseModel):
     run_id: int
     item_scores: int
     car_aggregates: int
+    skipped_items: int
+    parse_failures: int
+    run_overall: float | None
 
 
 class LeaderboardRow(BaseModel):

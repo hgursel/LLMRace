@@ -135,8 +135,38 @@ type RunJudgeDetail = {
   id: number
   run_item_id: number | null
   car_id: number | null
+  writing_score: number
+  coding_score: number
+  tool_score: number
   overall: number
   rationale: string
+}
+
+type JudgeActionResponse = {
+  run_id: number
+  item_scores: number
+  car_aggregates: number
+  skipped_items: number
+  parse_failures: number
+  run_overall: number | null
+}
+
+type JudgeSummaryRow = {
+  car_id: number
+  car_name: string
+  writing_score: number
+  coding_score: number
+  tool_score: number
+  overall: number
+  rationale: string
+}
+
+type JudgeSummary = {
+  run_id: number
+  item_scores: number
+  run_overall: number | null
+  run_rationale: string | null
+  rows: JudgeSummaryRow[]
 }
 
 type RunScorecardRow = {
@@ -200,6 +230,10 @@ const state = {
   selectedSuiteId: 0,
   selectedCarIds: [] as number[],
   selectedJudgeCarId: 0,
+  judgeTargetRunId: 0,
+  judgeInProgress: false,
+  judgeProgressMessage: '',
+  judgeSummary: null as JudgeSummary | null,
   currentRunId: 0,
   selectedRunDetailId: 0,
   selectedRunDetail: null as RunDetail | null,
@@ -208,6 +242,10 @@ const state = {
   selectedBaselineRunId: 0,
   telemetryLines: [] as string[],
   telemetryPaused: false,
+  runItemOutputs: new Map<number, string>(),
+  runItemLabels: new Map<number, string>(),
+  runItemOrder: [] as number[],
+  activeRunItemId: 0,
   hud: new Map<number, HudMetric>(),
   countdownText: '',
   suiteEditorText: '',
@@ -227,39 +265,32 @@ let stream: EventSource | null = null
 const RAW_PROXY_BASE = ((import.meta.env.VITE_PROXY_BASE_URL as string | undefined) ?? '').trim()
 const PROXY_BASE = RAW_PROXY_BASE ? RAW_PROXY_BASE.replace(/\/$/, '') : ''
 
-const CONNECTION_PRESETS: Record<string, { type: ConnectionType; baseUrl: string; note: string }> = {
+const CONNECTION_PRESETS: Record<ConnectionType, { baseUrl: string; note: string }> = {
   OLLAMA: {
-    type: 'OLLAMA',
     baseUrl: 'http://host.docker.internal:11434',
     note: 'Local Ollama endpoint; no API key required.',
   },
-  JAN: {
-    type: 'LLAMACPP_OPENAI',
+  LLAMACPP_OPENAI: {
     baseUrl: 'http://host.docker.internal:1337',
     note: 'Jan Local API Server (llama.cpp). API key required.',
   },
   OPENAI: {
-    type: 'OPENAI',
     baseUrl: 'https://api.openai.com',
     note: 'OpenAI cloud API. Use project API key.',
   },
   ANTHROPIC: {
-    type: 'ANTHROPIC',
     baseUrl: 'https://api.anthropic.com',
     note: 'Anthropic Messages API. Uses x-api-key auth.',
   },
   OPENROUTER: {
-    type: 'OPENROUTER',
     baseUrl: 'https://openrouter.ai',
     note: 'OpenRouter API. Optional referer/title headers are sent by proxy.',
   },
   OPENAI_COMPAT: {
-    type: 'OPENAI_COMPAT',
     baseUrl: 'http://host.docker.internal:1234',
     note: 'OpenAI-compatible local server (LM Studio style).',
   },
   CUSTOM: {
-    type: 'CUSTOM',
     baseUrl: 'http://host.docker.internal:1234',
     note: 'Custom OpenAI-compatible endpoint.',
   },
@@ -312,11 +343,35 @@ function html(strings: TemplateStringsArray, ...values: Array<string | number | 
   return strings.reduce((acc, curr, idx) => acc + curr + (values[idx] ?? ''), '')
 }
 
-function appendTelemetry(line: string): void {
-  state.telemetryLines.push(line)
-  if (state.telemetryLines.length > 1200) {
-    state.telemetryLines.shift()
+function activeRunItemId(): number {
+  if (state.activeRunItemId && state.runItemOrder.includes(state.activeRunItemId)) {
+    return state.activeRunItemId
   }
+  const fallback = state.runItemOrder[state.runItemOrder.length - 1] ?? 0
+  state.activeRunItemId = fallback
+  return fallback
+}
+
+function runItemLabel(runItemId: number): string {
+  return state.runItemLabels.get(runItemId) ?? `Item ${runItemId}`
+}
+
+function registerRunItem(runItemId: number, label?: string): void {
+  if (!state.runItemOrder.includes(runItemId)) {
+    state.runItemOrder.push(runItemId)
+  }
+  if (label) {
+    state.runItemLabels.set(runItemId, label)
+  }
+  if (!state.activeRunItemId) {
+    state.activeRunItemId = runItemId
+  }
+  if (!state.runItemOutputs.has(runItemId)) {
+    state.runItemOutputs.set(runItemId, '')
+  }
+}
+
+function refreshEventsConsole(): void {
   const box = document.getElementById('telemetryBox')
   if (!box) {
     return
@@ -325,6 +380,46 @@ function appendTelemetry(line: string): void {
   if (!state.telemetryPaused) {
     box.scrollTop = box.scrollHeight
   }
+}
+
+function refreshOutputConsole(): void {
+  const outputBox = document.getElementById('runtimeOutputBox')
+  const meta = document.getElementById('runtimeOutputMeta')
+  if (!outputBox || !meta) {
+    return
+  }
+
+  const currentItemId = activeRunItemId()
+  if (!currentItemId) {
+    outputBox.textContent = 'Start a run to see streamed output.'
+    meta.textContent = 'No active item.'
+    return
+  }
+
+  outputBox.textContent = state.runItemOutputs.get(currentItemId) ?? ''
+  meta.textContent = runItemLabel(currentItemId)
+  if (!state.telemetryPaused) {
+    outputBox.scrollTop = outputBox.scrollHeight
+  }
+}
+
+function appendTelemetry(line: string): void {
+  const stamp = new Date().toLocaleTimeString()
+  state.telemetryLines.push(`[${stamp}] ${line}`)
+  if (state.telemetryLines.length > 1200) {
+    state.telemetryLines.shift()
+  }
+  refreshEventsConsole()
+}
+
+function appendOutputToken(runItemId: number, token: string): void {
+  if (!token) {
+    return
+  }
+  registerRunItem(runItemId)
+  const current = state.runItemOutputs.get(runItemId) ?? ''
+  state.runItemOutputs.set(runItemId, `${current}${token}`)
+  refreshOutputConsole()
 }
 
 function setNotice(message: string): void {
@@ -375,34 +470,21 @@ function dockerHint(errorMessage?: string | null): string | null {
 function renderConnectionDiagnostic(connectionId: number): string {
   const connection = getConnectionById(connectionId)
   const diagnostic = state.connectionDiagnostics.get(connectionId)
-  const runtime = state.connectionRuntimeChecks.get(connectionId)
   const keySummary = connection?.has_stored_api_key
     ? '<div class="conn-model-list">Auth: encrypted key saved</div>'
     : '<div class="conn-error">Auth: no stored key</div>'
   if (!diagnostic) {
-    const runtimeSummary = runtime ? `<div class="conn-model-list">Runtime auth source: ${runtime.auth_source}</div>` : ''
-    return `<div class="conn-health">Status: untested${keySummary}${runtimeSummary}</div>`
+    return `<div class="conn-health">Status: untested${keySummary}</div>`
   }
 
   const checkedAt = new Date(diagnostic.checked_at_ms).toLocaleTimeString()
   const statusClass = diagnostic.ok ? 'ok' : 'error'
   const statusLabel = diagnostic.ok ? 'ONLINE' : 'OFFLINE'
-  const modelSummary =
-    diagnostic.models.length > 0
-      ? `<div class="conn-model-list">Models: ${diagnostic.models.slice(0, 8).join(', ')}${diagnostic.models.length > 8 ? ' ...' : ''}</div>`
-      : ''
   const latencySummary = diagnostic.latency_ms ? ` | ${diagnostic.latency_ms}ms` : ''
   const errorSummary = diagnostic.error ? `<div class="conn-error">${diagnostic.error}</div>` : ''
   const hint = dockerHint(diagnostic.error)
   const hintSummary = hint ? `<div class="conn-hint">${hint}</div>` : ''
-  const runtimeSummary = runtime
-    ? `<div class="conn-model-list">Runtime auth source: ${runtime.auth_source} | auth_present: ${runtime.auth_present}</div>`
-    : ''
-  const runtimeHints = runtime?.hints?.length
-    ? `<div class="conn-hint">${runtime.hints.join(' ')}</div>`
-    : ''
-
-  return `<div class="conn-health ${statusClass}">Status: ${statusLabel}${latencySummary} | checked ${checkedAt}${keySummary}${modelSummary}${errorSummary}${runtimeSummary}${runtimeHints}${hintSummary}</div>`
+  return `<div class="conn-health ${statusClass}">Status: ${statusLabel}${latencySummary} | checked ${checkedAt}${keySummary}${errorSummary}${hintSummary}</div>`
 }
 
 function getConnectionById(connectionId: number): Connection | undefined {
@@ -419,6 +501,74 @@ function describeCar(carId: number): string {
   const connection = getConnectionById(car.connection_id)
   const connectionInfo = connection ? `${connection.name} @ ${connection.base_url}` : 'missing connection'
   return `${car.name} (${car.model_name}) via ${connectionInfo}`
+}
+
+function describeRun(runId: number): string {
+  const run = state.runs.find((row) => row.id === runId)
+  if (!run) {
+    return `Run ${runId}`
+  }
+  const suiteName = state.suites.find((suite) => suite.id === run.suite_id)?.name ?? `suite:${run.suite_id ?? '-'}`
+  return `Run ${run.id} • ${suiteName}`
+}
+
+function buildJudgeSummary(detail: RunDetail): JudgeSummary | null {
+  if (!detail.judge_results.length) {
+    return null
+  }
+
+  const runAggregate = detail.judge_results.find((row) => row.run_item_id == null && row.car_id == null) ?? null
+  const rows = detail.judge_results
+    .filter((row) => row.run_item_id == null && row.car_id != null)
+    .map((row) => ({
+      car_id: row.car_id as number,
+      car_name: getCarById(row.car_id as number)?.name ?? `car:${row.car_id}`,
+      writing_score: row.writing_score,
+      coding_score: row.coding_score,
+      tool_score: row.tool_score,
+      overall: row.overall,
+      rationale: row.rationale,
+    }))
+    .sort((a, b) => b.overall - a.overall)
+
+  return {
+    run_id: detail.run.id,
+    item_scores: detail.judge_results.filter((row) => row.run_item_id != null).length,
+    run_overall: runAggregate?.overall ?? null,
+    run_rationale: runAggregate?.rationale ?? null,
+    rows,
+  }
+}
+
+async function loadRunInspection(runId: number): Promise<void> {
+  const [detail, scorecard] = await Promise.all([
+    api<RunDetail>(`/api/runs/${runId}`),
+    api<{ run_id: number; rows: RunScorecardRow[] }>(`/api/runs/${runId}/scorecard`),
+  ])
+  state.selectedRunDetailId = runId
+  state.selectedRunDetail = detail
+  state.selectedRunScorecard = scorecard.rows
+  if (!state.selectedBaselineRunId || state.selectedBaselineRunId === runId) {
+    const fallback = state.runs.find((run) => run.id !== runId)
+    state.selectedBaselineRunId = fallback ? fallback.id : 0
+  }
+  state.selectedRunComparison = []
+}
+
+async function loadJudgeSummaryForRun(runId: number): Promise<void> {
+  if (!runId) {
+    state.judgeSummary = null
+    return
+  }
+  try {
+    const detail = await api<RunDetail>(`/api/runs/${runId}`)
+    state.judgeSummary = buildJudgeSummary(detail)
+    if (state.selectedRunDetailId === runId) {
+      state.selectedRunDetail = detail
+    }
+  } catch {
+    state.judgeSummary = null
+  }
 }
 
 async function preflightSelectedCars(carIds: number[]): Promise<{ ok: boolean; message?: string }> {
@@ -589,6 +739,17 @@ async function refreshData(): Promise<void> {
     state.selectedBaselineRunId = 0
     state.selectedRunComparison = []
   }
+  const completed = runs.filter((run) => run.status === 'COMPLETED')
+  if (state.judgeTargetRunId && !completed.some((run) => run.id === state.judgeTargetRunId)) {
+    state.judgeTargetRunId = 0
+    state.judgeSummary = null
+  }
+  if (!state.judgeTargetRunId && completed.length > 0) {
+    state.judgeTargetRunId = completed[0].id
+  }
+  if (state.judgeSummary && state.judgeSummary.run_id !== state.judgeTargetRunId) {
+    state.judgeSummary = null
+  }
 
   if (!state.suiteEditorText && suites.length === 0) {
     state.suiteEditorText = defaultSuiteTemplate()
@@ -620,7 +781,6 @@ function renderGarage(): string {
         ${renderConnectionDiagnostic(c.id)}
         <div class="row" style="margin-top:6px;">
           <button data-action="test-connection" data-id="${c.id}">Test</button>
-          <button data-action="verify-runtime" data-id="${c.id}">Verify Runtime</button>
           <button data-action="delete-connection" data-id="${c.id}">Delete</button>
         </div>
       </li>`,
@@ -634,27 +794,15 @@ function renderGarage(): string {
         <form id="connectionForm" class="stack">
           <label>Name<input name="name" required /></label>
           <label>
-            Provider Preset
-            <select id="connectionPreset" name="preset">
+            Provider
+            <select id="connectionProvider" name="type">
               <option value="OLLAMA">Ollama</option>
-              <option value="JAN">Jan (llama.cpp)</option>
+              <option value="LLAMACPP_OPENAI">Jan (llama.cpp)</option>
               <option value="OPENAI">OpenAI</option>
               <option value="ANTHROPIC">Anthropic Claude</option>
               <option value="OPENROUTER">OpenRouter</option>
               <option value="OPENAI_COMPAT">OpenAI-compatible local</option>
               <option value="CUSTOM">Custom</option>
-            </select>
-          </label>
-          <label>
-            Type
-            <select name="type">
-              <option value="OLLAMA">OLLAMA</option>
-              <option value="OPENAI">OPENAI</option>
-              <option value="ANTHROPIC">ANTHROPIC</option>
-              <option value="OPENROUTER">OPENROUTER</option>
-              <option value="OPENAI_COMPAT">OPENAI_COMPAT</option>
-              <option value="LLAMACPP_OPENAI">LLAMACPP_OPENAI</option>
-              <option value="CUSTOM">CUSTOM</option>
             </select>
           </label>
           <label>Base URL<input name="base_url" id="connectionBaseUrl" placeholder="http://host.docker.internal:11434" required /></label>
@@ -819,6 +967,56 @@ function renderHud(): string {
     .join('')
 }
 
+function renderJudgeSummaryPanel(): string {
+  if (!state.judgeTargetRunId) {
+    return html`
+      <section class="card" style="margin-top:12px;">
+        <h3>Judge Summary</h3>
+        <div class="muted">No completed runs available to judge yet.</div>
+      </section>
+    `
+  }
+
+  const summary = state.judgeSummary
+  if (!summary || summary.run_id !== state.judgeTargetRunId) {
+    return html`
+      <section class="card" style="margin-top:12px;">
+        <h3>Judge Summary</h3>
+        <div class="muted">No judge results for ${describeRun(state.judgeTargetRunId)}.</div>
+      </section>
+    `
+  }
+
+  const rows = summary.rows
+    .map(
+      (row) => `<tr>
+        <td>${row.car_name}</td>
+        <td>${row.writing_score.toFixed(2)}</td>
+        <td>${row.coding_score.toFixed(2)}</td>
+        <td>${row.tool_score.toFixed(2)}</td>
+        <td>${row.overall.toFixed(2)}</td>
+        <td>${row.rationale}</td>
+      </tr>`,
+    )
+    .join('')
+
+  const overallText = summary.run_overall != null ? summary.run_overall.toFixed(2) : '-'
+  return html`
+    <section class="card" style="margin-top:12px;">
+      <h3>Judge Summary • ${describeRun(summary.run_id)}</h3>
+      <div class="row" style="margin-bottom:8px;">
+        <span class="badge">Run Overall ${overallText}</span>
+        <span class="muted">Scored items: ${summary.item_scores}</span>
+      </div>
+      <div class="muted" style="margin-bottom:8px;">${summary.run_rationale ?? 'No run-level rationale available.'}</div>
+      <table class="table">
+        <thead><tr><th>Profile</th><th>Writing</th><th>Coding</th><th>Tools</th><th>Overall</th><th>Rationale</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="6">No per-model aggregates found.</td></tr>'}</tbody>
+      </table>
+    </section>
+  `
+}
+
 function renderRace(): string {
   const suiteOptions = state.suites
     .map((s) => `<option value="${s.id}" ${state.selectedSuiteId === s.id ? 'selected' : ''}>${s.name}</option>`)
@@ -841,32 +1039,74 @@ function renderRace(): string {
   const judgeOptions = state.cars
     .map((c) => `<option value="${c.id}" ${state.selectedJudgeCarId === c.id ? 'selected' : ''}>${c.name}</option>`)
     .join('')
+  const completedRuns = state.runs.filter((run) => run.status === 'COMPLETED')
+  const judgeTargetCompleted = completedRuns.some((run) => run.id === state.judgeTargetRunId)
+  const judgeRunOptions = completedRuns
+    .map((run) => `<option value="${run.id}" ${run.id === state.judgeTargetRunId ? 'selected' : ''}>${describeRun(run.id)}</option>`)
+    .join('')
+  const judgeButtonDisabled = !judgeTargetCompleted || !state.selectedJudgeCarId || state.judgeInProgress
+  const judgeStatusText = state.judgeInProgress
+    ? state.judgeProgressMessage || 'Judging in progress...'
+    : !judgeTargetCompleted
+      ? 'Select a completed run and click Start Judging.'
+      : state.judgeSummary && state.judgeSummary.run_id === state.judgeTargetRunId
+      ? `Last result: run overall ${state.judgeSummary.run_overall != null ? state.judgeSummary.run_overall.toFixed(2) : '-'}`
+      : 'Select a completed run and click Start Judging.'
+  const currentItem = activeRunItemId()
+  const runtimeItemOptions = state.runItemOrder
+    .map((itemId) => `<option value="${itemId}" ${itemId === currentItem ? 'selected' : ''}>${runItemLabel(itemId)}</option>`)
+    .join('')
 
   return html`
     <div class="grid">
       <section class="card" style="grid-column: span 4;">
-        <h3>Start Run</h3>
+        <h3>Run Control</h3>
         <label>Suite<select id="raceSuiteSelect">${suiteOptions}</select></label>
         <div class="stack" style="margin-top:10px;">
           <strong>Models</strong>
           ${carChecks || '<div class="muted">Create model profiles first.</div>'}
         </div>
-        <label style="margin-top:10px;">Judge Model<select id="judgeSelect">${judgeOptions}</select></label>
-        <div class="row" style="margin-top:12px;">
-          <button class="primary" id="startRaceBtn">Start Run</button>
-          <button id="judgeRunBtn">Judge Run</button>
-        </div>
+        <div class="row" style="margin-top:12px;"><button class="primary" id="startRaceBtn">Start Run</button></div>
         <div id="countdown" class="countdown">${state.countdownText}</div>
+        <hr style="border:0;border-top:1px solid #234b2c;margin:10px 0;" />
+        <h3>Judge Run</h3>
+        <label>
+          Run to Judge
+          <select id="judgeRunSelect" ${judgeRunOptions ? '' : 'disabled'}>
+            ${judgeRunOptions || '<option value="">No completed runs</option>'}
+          </select>
+        </label>
+        <label style="margin-top:8px;">Judge Model<select id="judgeSelect">${judgeOptions}</select></label>
+        <div class="row" style="margin-top:10px;">
+          <button id="judgeRunBtn" ${judgeButtonDisabled ? 'disabled' : ''}>${state.judgeInProgress ? 'Judging...' : 'Start Judging'}</button>
+        </div>
+        <div class="muted" style="margin-top:8px;">${judgeStatusText}</div>
       </section>
 
       <section class="card" style="grid-column: span 8;">
         <h3>Runtime Console</h3>
-        <div class="row" style="margin-bottom:8px;">
+        <div class="row runtime-toolbar" style="margin-bottom:8px;">
+          <label style="min-width: 240px;">
+            Output Item
+            <select id="runtimeItemSelect" ${runtimeItemOptions ? '' : 'disabled'}>
+              ${runtimeItemOptions || '<option value="">No run items yet</option>'}
+            </select>
+          </label>
           <button id="toggleScrollBtn">${state.telemetryPaused ? 'Resume Scroll' : 'Pause Scroll'}</button>
           <button id="clearTelemetryBtn">Clear</button>
           <span class="muted">Run ID: ${state.currentRunId || '-'}</span>
         </div>
-        <pre id="telemetryBox" class="telemetry">${state.telemetryLines.join('\n')}</pre>
+        <div class="runtime-shell">
+          <section class="runtime-pane runtime-pane-output">
+            <div class="runtime-pane-title">Generated Output</div>
+            <div id="runtimeOutputMeta" class="muted"></div>
+            <pre id="runtimeOutputBox" class="runtime-output"></pre>
+          </section>
+          <section class="runtime-pane runtime-pane-events">
+            <div class="runtime-pane-title">Event Log</div>
+            <pre id="telemetryBox" class="runtime-events"></pre>
+          </section>
+        </div>
       </section>
     </div>
 
@@ -874,6 +1114,7 @@ function renderRace(): string {
       <h3>Metrics</h3>
       <div class="hud">${renderHud()}</div>
     </section>
+    ${renderJudgeSummaryPanel()}
   `
 }
 
@@ -952,6 +1193,7 @@ function renderHistory(): string {
         <td>${r.finished_at ?? '-'}</td>
         <td class="row">
           <button data-action="inspect-run" data-id="${r.id}">Inspect</button>
+          <button data-action="judge-target" data-id="${r.id}" ${r.status === 'COMPLETED' ? '' : 'disabled'}>Judge</button>
           <button data-action="export-run" data-id="${r.id}">Export</button>
         </td>
       </tr>`,
@@ -1014,12 +1256,23 @@ function renderRunDetail(): string {
     })
     .join('')
 
-  const judgeRows = detail.judge_results
+  const judgeItemRows = detail.judge_results
+    .filter((row) => row.run_item_id != null)
     .map(
       (row) =>
-        `<tr><td>${row.id}</td><td>${row.run_item_id ?? '-'}</td><td>${row.car_id ?? '-'}</td><td>${row.overall.toFixed(2)}</td><td>${row.rationale}</td></tr>`,
+        `<tr><td>${row.run_item_id ?? '-'}</td><td>${row.car_id ?? '-'}</td><td>${row.writing_score.toFixed(2)}</td><td>${row.coding_score.toFixed(2)}</td><td>${row.tool_score.toFixed(2)}</td><td>${row.overall.toFixed(2)}</td><td>${row.rationale}</td></tr>`,
     )
     .join('')
+
+  const judgeAggregateRows = detail.judge_results
+    .filter((row) => row.run_item_id == null && row.car_id != null)
+    .map(
+      (row) =>
+        `<tr><td>${getCarById(row.car_id as number)?.name ?? row.car_id}</td><td>${row.writing_score.toFixed(2)}</td><td>${row.coding_score.toFixed(2)}</td><td>${row.tool_score.toFixed(2)}</td><td>${row.overall.toFixed(2)}</td><td>${row.rationale}</td></tr>`,
+    )
+    .join('')
+
+  const judgeRunAggregate = detail.judge_results.find((row) => row.run_item_id == null && row.car_id == null) ?? null
 
   const scorecardRows = state.selectedRunScorecard
     .map((row) => {
@@ -1083,9 +1336,17 @@ function renderRunDetail(): string {
         <tbody>${itemRows || '<tr><td colspan="11">No run items.</td></tr>'}</tbody>
       </table>
       <h3 style="margin-top:14px;">Judge Results</h3>
+      <div class="row" style="margin-bottom:8px;">
+        <span class="badge">Run Overall ${judgeRunAggregate ? judgeRunAggregate.overall.toFixed(2) : '-'}</span>
+        <span class="muted">${judgeRunAggregate?.rationale ?? 'No run-level aggregate yet.'}</span>
+      </div>
       <table class="table">
-        <thead><tr><th>ID</th><th>Run Item</th><th>Model</th><th>Overall</th><th>Rationale</th></tr></thead>
-        <tbody>${judgeRows || '<tr><td colspan="5">No judge results.</td></tr>'}</tbody>
+        <thead><tr><th>Profile</th><th>Writing</th><th>Coding</th><th>Tools</th><th>Overall</th><th>Rationale</th></tr></thead>
+        <tbody>${judgeAggregateRows || '<tr><td colspan="6">No aggregate judge results.</td></tr>'}</tbody>
+      </table>
+      <table class="table" style="margin-top:10px;">
+        <thead><tr><th>Run Item</th><th>Model</th><th>Writing</th><th>Coding</th><th>Tools</th><th>Overall</th><th>Rationale</th></tr></thead>
+        <tbody>${judgeItemRows || '<tr><td colspan="7">No per-item judge results.</td></tr>'}</tbody>
       </table>
       <h3 style="margin-top:14px;">Run Scorecard</h3>
       <table class="table">
@@ -1175,6 +1436,8 @@ function renderApp(): void {
   `
 
   wireEvents()
+  refreshEventsConsole()
+  refreshOutputConsole()
 }
 
 function wireEvents(): void {
@@ -1187,19 +1450,17 @@ function wireEvents(): void {
 
   const connectionForm = document.getElementById('connectionForm') as HTMLFormElement | null
   if (connectionForm) {
-    const presetSelect = document.getElementById('connectionPreset') as HTMLSelectElement | null
-    const typeSelect = connectionForm.querySelector('select[name="type"]') as HTMLSelectElement | null
+    const providerSelect = connectionForm.querySelector('select[name="type"]') as HTMLSelectElement | null
     const baseUrlInput = document.getElementById('connectionBaseUrl') as HTMLInputElement | null
     const presetNote = document.getElementById('connectionPresetNote') as HTMLSpanElement | null
-    const applyPreset = (presetKey: string) => {
-      const preset = CONNECTION_PRESETS[presetKey] ?? CONNECTION_PRESETS.CUSTOM
-      if (typeSelect) typeSelect.value = preset.type
+    const applyProviderPreset = (providerType: string) => {
+      const preset = CONNECTION_PRESETS[(providerType as ConnectionType) ?? 'CUSTOM'] ?? CONNECTION_PRESETS.CUSTOM
       if (baseUrlInput) baseUrlInput.value = preset.baseUrl
       if (presetNote) presetNote.textContent = preset.note
     }
-    applyPreset(presetSelect?.value ?? 'OLLAMA')
-    if (presetSelect) {
-      presetSelect.onchange = () => applyPreset(presetSelect.value)
+    applyProviderPreset(providerSelect?.value ?? 'OLLAMA')
+    if (providerSelect) {
+      providerSelect.onchange = () => applyProviderPreset(providerSelect.value)
     }
 
     connectionForm.onsubmit = async (ev) => {
@@ -1234,7 +1495,9 @@ function wireEvents(): void {
           error: result.error ?? null,
           checked_at_ms: Date.now(),
         })
-        const msg = `[CONNECTION ${id}] ok=${result.ok} latency=${result.latency_ms ?? '-'}ms models=${result.models.join(',') || '-'} ${result.error ?? ''}`
+        const msg = result.ok
+          ? `[CONNECTION ${id}] TEST OK${result.latency_ms ? ` (${result.latency_ms}ms)` : ''}`
+          : `[CONNECTION ${id}] TEST NOT OK${result.error ? `: ${result.error}` : ''}`
         appendTelemetry(msg)
         setNotice(msg)
         renderApp()
@@ -1251,27 +1514,6 @@ function wireEvents(): void {
         setNotice(msg)
         alert(msg)
         renderApp()
-      }
-    }
-  })
-
-  document.querySelectorAll<HTMLButtonElement>('[data-action="verify-runtime"]').forEach((button) => {
-    button.onclick = async () => {
-      const id = Number(button.dataset.id)
-      setNotice(`[CONNECTION ${id}] runtime verify...`)
-      try {
-        const runtime = await api<ConnectionRuntimeCheck>(`/api/connections/${id}/verify-runtime`, { method: 'POST' })
-        state.connectionRuntimeChecks.set(id, runtime)
-        const message = `[CONNECTION ${id}] runtime auth=${runtime.auth_source} present=${runtime.auth_present} discovery_ok=${runtime.discovery_ok} models=${runtime.models.join(',') || '-'}`
-        appendTelemetry(message)
-        setNotice(message)
-        renderApp()
-      } catch (error) {
-        const prettyError = simplifyError(error)
-        const message = `[CONNECTION ${id}] runtime verify failed: ${prettyError}`
-        appendTelemetry(message)
-        setNotice(message)
-        alert(message)
       }
     }
   })
@@ -1509,6 +1751,18 @@ function wireEvents(): void {
     }
   }
 
+  const judgeRunSelect = document.getElementById('judgeRunSelect') as HTMLSelectElement | null
+  if (judgeRunSelect) {
+    judgeRunSelect.onchange = async () => {
+      state.judgeTargetRunId = Number(judgeRunSelect.value)
+      state.judgeSummary = null
+      renderApp()
+      await loadJudgeSummaryForRun(state.judgeTargetRunId)
+      renderApp()
+      setNotice(`Judge target set to ${describeRun(state.judgeTargetRunId)}.`)
+    }
+  }
+
   document.querySelectorAll<HTMLInputElement>('input[data-car-id]').forEach((check) => {
     check.onchange = () => {
       const carId = Number(check.dataset.carId)
@@ -1543,6 +1797,10 @@ function wireEvents(): void {
 
       await runCountdown()
       state.telemetryLines = []
+      state.runItemOutputs.clear()
+      state.runItemLabels.clear()
+      state.runItemOrder = []
+      state.activeRunItemId = 0
       state.hud.clear()
       state.runItemCarMap.clear()
 
@@ -1568,20 +1826,52 @@ function wireEvents(): void {
   const judgeRunBtn = document.getElementById('judgeRunBtn') as HTMLButtonElement | null
   if (judgeRunBtn) {
     judgeRunBtn.onclick = async () => {
-      if (!state.currentRunId) {
-        alert('Start or select a run first.')
+      if (!state.judgeTargetRunId) {
+        alert('Select a completed run to judge.')
+        return
+      }
+      if (!state.selectedJudgeCarId) {
+        alert('Select a judge model first.')
         return
       }
 
-      appendTelemetry(`[RUN ${state.currentRunId}] judge started`)
-      setNotice(`RUN ${state.currentRunId} judge started`)
-      await api(`/api/runs/${state.currentRunId}/judge`, {
-        method: 'POST',
-        body: JSON.stringify({ judge_car_id: state.selectedJudgeCarId || null }),
-      })
-      appendTelemetry(`[RUN ${state.currentRunId}] judge completed`)
-      setNotice(`RUN ${state.currentRunId} judge completed`)
-      await refreshAndRender('Judge completed.')
+      const runId = state.judgeTargetRunId
+      const targetRun = state.runs.find((run) => run.id === runId)
+      if (!targetRun || targetRun.status !== 'COMPLETED') {
+        alert('Judge target must be a completed run.')
+        return
+      }
+      state.judgeInProgress = true
+      state.judgeProgressMessage = `Judging ${describeRun(runId)} with ${describeCar(state.selectedJudgeCarId)}...`
+      renderApp()
+      appendTelemetry(`[JUDGE] started run=${runId} model=${describeCar(state.selectedJudgeCarId)}`)
+      setNotice(state.judgeProgressMessage)
+
+      try {
+        const result = await api<JudgeActionResponse>(`/api/runs/${runId}/judge`, {
+          method: 'POST',
+          body: JSON.stringify({ judge_car_id: state.selectedJudgeCarId || null }),
+        })
+        state.judgeProgressMessage = `Judging completed: ${result.item_scores} scored, ${result.skipped_items} skipped, ${result.parse_failures} parse failures.`
+        appendTelemetry(
+          `[JUDGE] completed run=${runId} scored=${result.item_scores} skipped=${result.skipped_items} parse_failures=${result.parse_failures} overall=${result.run_overall ?? '-'}`,
+        )
+        await refreshData()
+        await loadJudgeSummaryForRun(runId)
+        if (state.selectedRunDetailId === runId) {
+          await loadRunInspection(runId)
+        }
+        setNotice(`Judge completed for ${describeRun(runId)}.`)
+      } catch (error) {
+        const prettyError = simplifyError(error)
+        state.judgeProgressMessage = `Judge failed: ${prettyError}`
+        appendTelemetry(`[JUDGE] failed run=${runId}: ${prettyError}`)
+        setNotice(state.judgeProgressMessage)
+        alert(state.judgeProgressMessage)
+      } finally {
+        state.judgeInProgress = false
+        renderApp()
+      }
     }
   }
 
@@ -1597,7 +1887,19 @@ function wireEvents(): void {
   if (clearTelemetryBtn) {
     clearTelemetryBtn.onclick = () => {
       state.telemetryLines = []
+      state.runItemOutputs.clear()
+      state.runItemLabels.clear()
+      state.runItemOrder = []
+      state.activeRunItemId = 0
       renderApp()
+    }
+  }
+
+  const runtimeItemSelect = document.getElementById('runtimeItemSelect') as HTMLSelectElement | null
+  if (runtimeItemSelect) {
+    runtimeItemSelect.onchange = () => {
+      state.activeRunItemId = Number(runtimeItemSelect.value)
+      refreshOutputConsole()
     }
   }
 
@@ -1627,20 +1929,31 @@ function wireEvents(): void {
   document.querySelectorAll<HTMLButtonElement>('[data-action="inspect-run"]').forEach((button) => {
     button.onclick = async () => {
       const id = Number(button.dataset.id)
-      const [detail, scorecard] = await Promise.all([
-        api<RunDetail>(`/api/runs/${id}`),
-        api<{ run_id: number; rows: RunScorecardRow[] }>(`/api/runs/${id}/scorecard`),
-      ])
-      state.selectedRunDetailId = id
-      state.selectedRunDetail = detail
-      state.selectedRunScorecard = scorecard.rows
-      if (!state.selectedBaselineRunId || state.selectedBaselineRunId === id) {
-        const fallback = state.runs.find((run) => run.id !== id)
-        state.selectedBaselineRunId = fallback ? fallback.id : 0
+      await loadRunInspection(id)
+      const selectedRun = state.runs.find((run) => run.id === id)
+      if (selectedRun?.status === 'COMPLETED') {
+        state.judgeTargetRunId = id
+        await loadJudgeSummaryForRun(id)
       }
-      state.selectedRunComparison = []
       renderApp()
       setNotice(`Run ${id} loaded.`)
+    }
+  })
+
+  document.querySelectorAll<HTMLButtonElement>('[data-action="judge-target"]').forEach((button) => {
+    button.onclick = async () => {
+      const id = Number(button.dataset.id)
+      const targetRun = state.runs.find((run) => run.id === id)
+      if (!targetRun || targetRun.status !== 'COMPLETED') {
+        setNotice(`Run ${id} is not completed yet.`)
+        return
+      }
+      state.activeTab = 'race'
+      state.judgeTargetRunId = id
+      state.judgeSummary = null
+      await loadJudgeSummaryForRun(id)
+      renderApp()
+      setNotice(`${describeRun(id)} selected for judging.`)
     }
   })
 
@@ -1734,12 +2047,16 @@ function connectRunStream(runId: number): void {
   listen('run.started', (p) => appendTelemetry(`[RUN] status=${p.status}`))
   listen('item.started', (p) => {
     const carId = Number(p.car_id)
-    state.runItemCarMap.set(Number(p.run_item_id), carId)
-    appendTelemetry(`[ITEM ${p.run_item_id}] started profile=${describeCar(carId)} test=${p.test_id}`)
+    const runItemId = Number(p.run_item_id)
+    state.runItemCarMap.set(runItemId, carId)
+    registerRunItem(runItemId, `Item ${runItemId} · Test ${p.test_id} · ${describeCar(carId)}`)
+    state.activeRunItemId = runItemId
+    appendTelemetry(`[ITEM ${runItemId}] started profile=${describeCar(carId)} test=${p.test_id}`)
+    renderApp()
   })
   listen('request.sent', (p) => appendTelemetry(`[ITEM ${p.run_item_id}] request sent model=${p.model} loop=${p.loop}`))
   listen('ttft.recorded', (p) => appendTelemetry(`[ITEM ${p.run_item_id}] TTFT ${p.ttft_ms}ms`))
-  listen('token.delta', (p) => appendTelemetry(`[ITEM ${p.run_item_id}] ${p.token}`))
+  listen('token.delta', (p) => appendOutputToken(Number(p.run_item_id), String(p.token ?? '')))
   listen('tool.call.detected', (p) => appendTelemetry(`[TOOLS] detected ${p.count} calls`))
   listen('tool.call.executed', (p) => appendTelemetry(`[TOOL] ${p.tool_name} -> ${JSON.stringify(p.result)}`))
   listen('tool.loop.continue', (p) => appendTelemetry(`[ITEM ${p.run_item_id}] tool loop continue (${p.tool_calls})`))
@@ -1777,10 +2094,37 @@ function connectRunStream(runId: number): void {
     }
     await refreshAndRender('Run completed.')
   })
-  listen('judge.started', () => appendTelemetry('[JUDGE] started'))
+  listen('judge.started', (p) => {
+    state.judgeInProgress = true
+    state.judgeTargetRunId = runId
+    const totalItems = Number(p.total_items ?? 0)
+    state.judgeProgressMessage = totalItems > 0 ? `Judging ${describeRun(runId)} (0/${totalItems})...` : 'Judging started...'
+    appendTelemetry(`[JUDGE] started run=${runId} total_items=${totalItems}`)
+    renderApp()
+  })
+  listen('judge.item.scored', (p) => {
+    const scored = Number(p.scored_items ?? 0)
+    const total = Number(p.total_items ?? 0)
+    state.judgeInProgress = true
+    state.judgeProgressMessage = total > 0 ? `Judging ${describeRun(runId)} (${scored}/${total})...` : 'Judging in progress...'
+    appendTelemetry(
+      `[JUDGE] item scored run_item=${p.run_item_id} overall=${p.overall} progress=${scored}/${total} parse_failures=${p.parse_failures ?? 0}`,
+    )
+    renderApp()
+  })
   listen('judge.completed', async (p) => {
-    appendTelemetry(`[JUDGE] completed items=${p.item_scores}`)
-    await refreshAndRender('Judge update received.')
+    state.judgeInProgress = false
+    state.judgeProgressMessage = `Judging completed: ${p.item_scores} scored, ${p.skipped_items ?? 0} skipped, ${p.parse_failures ?? 0} parse failures.`
+    appendTelemetry(
+      `[JUDGE] completed run=${runId} scored=${p.item_scores} skipped=${p.skipped_items ?? 0} parse_failures=${p.parse_failures ?? 0} overall=${p.run_overall ?? '-'}`,
+    )
+    await refreshData()
+    await loadJudgeSummaryForRun(runId)
+    if (state.selectedRunDetailId === runId) {
+      await loadRunInspection(runId)
+    }
+    renderApp()
+    setNotice(`Judge update received for ${describeRun(runId)}.`)
   })
 
   stream.onerror = () => {
@@ -1803,6 +2147,9 @@ async function refreshAndRender(message?: string): Promise<void> {
 
 async function bootstrap(): Promise<void> {
   await refreshData()
+  if (state.judgeTargetRunId) {
+    await loadJudgeSummaryForRun(state.judgeTargetRunId)
+  }
   state.selectedCarIds = []
   if (!state.suiteEditorText) {
     state.suiteEditorText = defaultSuiteTemplate()

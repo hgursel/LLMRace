@@ -123,6 +123,9 @@ def test_run_stream_judge_and_leaderboard(client: Any, monkeypatch: Any) -> None
     judge = client.post(f'/api/runs/{run_id}/judge', json={'judge_car_id': car_id})
     assert judge.status_code == 200
     assert judge.json()['item_scores'] > 0
+    assert 'parse_failures' in judge.json()
+    assert 'skipped_items' in judge.json()
+    assert 'run_overall' in judge.json()
 
     leaderboard = client.get('/api/leaderboard')
     assert leaderboard.status_code == 200

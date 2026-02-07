@@ -503,6 +503,8 @@ async def judge_run(run_id: int, payload: JudgeRequest, db: Session = Depends(ge
     run = db.get(Run, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
+    if run.status != RunStatus.COMPLETED:
+        raise HTTPException(status_code=400, detail="Run must be COMPLETED before judging")
 
     judge_car_id = payload.judge_car_id or run.judge_car_id_nullable
     if not judge_car_id:
@@ -516,8 +518,6 @@ async def judge_run(run_id: int, payload: JudgeRequest, db: Session = Depends(ge
     if not judge_connection:
         raise HTTPException(status_code=404, detail="Judge connection not found")
 
-    emit_event(db, run_id, "judge.started", {"judge_car_id": judge_car_id})
-
     db.execute(delete(JudgeResult).where(JudgeResult.run_id == run_id))
     db.commit()
 
@@ -528,13 +528,27 @@ async def judge_run(run_id: int, payload: JudgeRequest, db: Session = Depends(ge
     }
     tests_by_id = {row.id: row for row in db.scalars(select(TestCase).where(TestCase.id.in_([item.test_id for item in run_items if item.test_id])))}
 
-    item_scores = 0
+    candidates: list[tuple[RunItem, Output, TestCase]] = []
+    skipped_items = 0
     for item in run_items:
         output = outputs_by_item.get(item.id)
         test_case = tests_by_id.get(item.test_id)
         if not output or not test_case:
+            skipped_items += 1
             continue
+        candidates.append((item, output, test_case))
 
+    total_items = len(candidates)
+    emit_event(
+        db,
+        run_id,
+        "judge.started",
+        {"judge_car_id": judge_car_id, "total_items": total_items, "skipped_items": skipped_items},
+    )
+
+    item_scores = 0
+    parse_failures = 0
+    for item, output, test_case in candidates:
         messages = build_judge_messages(test_case.name, test_case.user_prompt, output.final_text or output.streamed_text or "")
         request = NormalizedChatRequest(
             model=judge_car.model_name,
@@ -562,7 +576,10 @@ async def judge_run(run_id: int, payload: JudgeRequest, db: Session = Depends(ge
         raw_text = judge_response.text or "".join(chunks)
         try:
             parsed = parse_judge_json(raw_text)
+            parse_failed = False
         except Exception:  # noqa: BLE001
+            parse_failures += 1
+            parse_failed = True
             parsed = {
                 "writing_score": 0.0,
                 "coding_score": 0.0,
@@ -585,6 +602,20 @@ async def judge_run(run_id: int, payload: JudgeRequest, db: Session = Depends(ge
             )
         )
         item_scores += 1
+        emit_event(
+            db,
+            run_id,
+            "judge.item.scored",
+            {
+                "run_item_id": item.id,
+                "scored_items": item_scores,
+                "total_items": total_items,
+                "parse_failures": parse_failures,
+                "parse_failed": parse_failed,
+                "overall": parsed["overall"],
+            },
+            run_item_id=item.id,
+        )
 
     db.commit()
 
@@ -640,6 +671,34 @@ async def judge_run(run_id: int, payload: JudgeRequest, db: Session = Depends(ge
         )
 
     db.commit()
-    emit_event(db, run_id, "judge.completed", {"item_scores": item_scores, "car_aggregates": car_aggregates})
+    run_overall_row = db.scalar(
+        select(JudgeResult)
+        .where(
+            JudgeResult.run_id == run_id,
+            JudgeResult.run_item_id_nullable.is_(None),
+            JudgeResult.car_id_nullable.is_(None),
+        )
+        .order_by(JudgeResult.id.desc())
+    )
+    run_overall = run_overall_row.overall if run_overall_row is not None else None
+    emit_event(
+        db,
+        run_id,
+        "judge.completed",
+        {
+            "item_scores": item_scores,
+            "car_aggregates": car_aggregates,
+            "skipped_items": skipped_items,
+            "parse_failures": parse_failures,
+            "run_overall": run_overall,
+        },
+    )
 
-    return JudgeResponse(run_id=run_id, item_scores=item_scores, car_aggregates=car_aggregates)
+    return JudgeResponse(
+        run_id=run_id,
+        item_scores=item_scores,
+        car_aggregates=car_aggregates,
+        skipped_items=skipped_items,
+        parse_failures=parse_failures,
+        run_overall=run_overall,
+    )
